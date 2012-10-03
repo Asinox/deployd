@@ -5,7 +5,7 @@
  */
 
 var program = require('commander')
-  , deployd = require('../')
+  , deployd = require('../').createMonitor
   , repl = require('../lib/client/repl')
   , shelljs = require('shelljs/global')
   , mongod = require('../lib/util/mongod')
@@ -14,9 +14,10 @@ var program = require('commander')
   , tty = require('tty')
   , remote = require('../lib/client/remote')
   , request = require('request')
-  , package = require('../package')
+  , packageInfo = require('../package')
   , latestversionFile = path.join(__dirname, '../.latestversion')
   , Deployment = require('../lib/client/deploy').Deployment
+  , Step = require('step')
   , open = require('../lib/util/open');
 
 /**
@@ -31,6 +32,11 @@ program
   .option('-d, --dashboard', 'start the dashboard immediately')
   .option('-o, --open', 'open in a browser')
   .option('-e, --environment [env]', 'defaults to development')
+  .option('-h, --host [host]', 'specify host for mongo server')
+  .option('-P, --mongoPort [mongoPort]', 'mongodb port to connect to')
+  .option('-n, --dbname [dbname]', 'name of the mongo database')
+  .option('-a, --auth', 'prompts for mongo server credentials')
+  ;
 
 /**
  * Commands
@@ -64,17 +70,33 @@ program
   });
 
 function start(file) {
-  var port = program.port || 2403
-    , mongoPort = generatePort();
+  var port = program.port
+    , host = program.host || '127.0.0.1'
+    , dbname = program.dbname || '-deployd'
+    , mongoPort = generatePort()
+    , env = program.environment || process.env.DPD_ENV || 'development'
+    , retries = 0
+    , credentials
+    ;
+
+  if (!port) {
+    port = 2403;
+    retries = env === 'development' && 5;
+  }
+  
+  if (program.mongoPort) {
+      mongoPort = Number(program.mongoPort);
+  }
+
   if (file) {
     process.chdir(path.dirname(file));
   }
   if (test('-f', 'app.dpd')) {
-    console.log("starting deployd v" + package.version + "...");
+    console.log("starting deployd v" + packageInfo.version + "...");
 
     if (fs.existsSync(latestversionFile)) {
       var latest = fs.readFileSync(latestversionFile, 'utf-8');
-      if (latest && latest !== package.version) {
+      if (latest && latest !== packageInfo.version) {
         console.log("deployd v" + latest + " is available. Use dpd-update command to install");
       }  
     }
@@ -84,29 +106,99 @@ function start(file) {
     if (!test('-d', './.dpd/pids')) mkdir('-p', './.dpd/pids');
     if (!test('-d', './data')) mkdir('-p', './data');
 
-    mongod.restart(program.mongod || 'mongod', process.env.DPD_ENV || 'development', mongoPort, function(err) {
+    function startup (err) {
       if (err) { 
         console.log("Failed to start MongoDB");
         return stop(1);
       }
-      var options = {port: port, env: 'development', db: {host: '127.0.0.1', port: mongoPort, name: '-deployd'}}
+
+      var options = {port: port, env: 'development', db: {host: host, port: mongoPort, name: dbname}};
 
       options.env = program.environment || process.env.DPD_ENV || options.env;
       if(options.env !== 'development') console.log('starting in %s mode', options.env);
 
+      if(credentials !== undefined) options.db.credentials = credentials;
       var dpd = deployd(options);
       dpd.listen();
-      dpd.on('listening', function () {
 
-        console.info('listening on port', port);
+      var onListening = function () {
+
+        console.info('listening on port', options.port);
         var commands = repl(dpd);
         if (program.dashboard) {
           commands.dashboard();
         } else if (program.open) {
           commands.open();
         }
-      });
-    });
+      };
+
+      var onError = function(err) {
+        if (err.code === "EADDRINUSE") {
+          console.error();
+          console.error("ERROR: port " + options.port + " is already in use");
+          if (retries > 0) {
+            options.port++;
+            console.log("Trying again on port " + options.port + "...");
+            console.log();
+            retries--;
+            dpd = deployd(options);
+            dpd.listen();
+            dpd.on('listening', onListening);
+            dpd.on('error', onError);
+          } else {
+            process.exit();  
+          }          
+        } else {
+          console.error(err);
+          process.exit();  
+        }
+      };
+
+      dpd.on('listening', onListening);
+      dpd.on('error', onError);
+    }
+    
+    if (program.auth && program.host === undefined) {
+        console.error("Authentication requires the '-h' host flag... exiting.");
+        process.exit();
+    }
+    
+    if (program.host) {
+        if (program.auth) {
+            Step(function () {
+                    var next = this;
+                    credentials = {};
+                    program.prompt('username: ', function(username){
+                        if (username && username != '') {
+                            credentials.username = username;
+                            next();
+                        } else {
+                            console.error('Username cannot be blank.')
+                            process.exit();
+                        }
+                    });
+                }, 
+                function () {
+                    var next = this;
+                    program.password('Password: ', function(pass){
+                        if (pass && pass != '') {
+                            credentials.password = pass;
+                            next();
+                        } else {
+                            console.error('Password cannot be blank.')
+                            process.exit();
+                        }
+                    });
+                },
+                startup
+            );
+        } else {
+            startup();
+        }
+    } else {
+        mongod.restart(program.mongod || 'mongod', env, mongoPort, startup);
+    }
+    
   } else {
     console.log("This directory does not contain a Deployd app!");
     console.log("Use \"dpd create <appname>\" to create a new app");
@@ -174,7 +266,7 @@ program
         , Keys = require('../lib/keys')
         , keys = new Keys();
 
-      if (process.env["DPDAPP_PORT"]) DPDAPP_URL += ':' + process.env["DPDAPP_PORT"];
+      if (process.env.DPDAPP_PORT) DPDAPP_URL += ':' + process.env.DPDAPP_PORT;
 
       keys.getLocal(function (err, key) {
         if(err) return console.error(err);
@@ -227,13 +319,6 @@ function stop(code) {
     fn();
   }
 }
-
-process.on('uncaughtException', function(err) {
-  // console.log(err);
-  console.log(err.stack);
-  stop(1);
-});
-
 
 /**
  * Parse the arguments

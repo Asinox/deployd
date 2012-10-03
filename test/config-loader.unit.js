@@ -2,7 +2,7 @@ var configLoader = require('../lib/config-loader')
   , sh = require('shelljs')
   , path = require('path')
   , fs = require('fs')
-  , db = require('../lib/db').connect({name: 'test-db', host: 'localhost', port: 27017})
+  , db = require('../lib/db').create({name: 'test-db', host: 'localhost', port: 27017})
   , Server = require('../lib/server')
   , Collection = require('../lib/resources/collection')
   , Files = require('../lib/resources/files')
@@ -24,6 +24,8 @@ describe('config-loader', function() {
 
 
     it('should load resources', function(done) {
+      this.timeout(10000);
+      
       sh.mkdir('-p', path.join(basepath, 'resources/foo'));
       sh.mkdir('-p', path.join(basepath, 'resources/bar'));
       JSON.stringify({type: "Collection", val: 1}).to(path.join(basepath, 'resources/foo/config.json'));
@@ -32,8 +34,8 @@ describe('config-loader', function() {
       configLoader.loadConfig(basepath, this.server, function(err, resources) {
         if (err) return done(err);
         expect(resources).to.have.length(6);
-        expect(resources.filter(function(r) { return r.name == 'foo'})).to.have.length(1);
-        expect(resources.filter(function(r) { return r.name == 'bar'})).to.have.length(1);
+        expect(resources.filter(function(r) { return r.name == 'foo';})).to.have.length(1);
+        expect(resources.filter(function(r) { return r.name == 'bar';})).to.have.length(1);
         done();  
       });
     });
@@ -53,7 +55,7 @@ describe('config-loader', function() {
     });
 
     it('should add internal resources', function(done) {
-      sh.mkdir('-p', path.join(basepath, 'resources/foo'));
+      sh.mkdir('-p', path.join(basepath, 'resources'));
 
       configLoader.loadConfig(basepath, {}, function(err, resourceList) {
         if (err) return done(err);
@@ -65,6 +67,26 @@ describe('config-loader', function() {
         expect(resourceList[3] instanceof Dashboard).to.equal(true);      
 
         done(err);  
+      });
+    });
+
+    it('should not attempt to load files', function(done) {
+      sh.mkdir('-p', path.join(basepath, 'resources'));
+      ('').to(path.join(basepath, 'resources/.DS_STORE'));
+
+      configLoader.loadConfig(basepath, {}, function(err, resourceList) {
+        if (err) return done(err);
+        done();
+      });
+    });
+
+    it('should throw a sane error when looking for config.json', function(done) {
+      sh.mkdir('-p', path.join(basepath, 'resources/foo'));
+
+      configLoader.loadConfig(basepath, {}, function(err, resourceList) {
+        expect(err).to.exist;
+        expect(err.message).to.equal("Expected file: " + path.join('resources', 'foo', 'config.json'));
+        done();
       });
     });
   });
